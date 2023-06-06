@@ -1,5 +1,5 @@
-import type { ChildProcess, ChildProcessByStdio } from 'child_process';
-import type { Readable, Writable } from 'stream';
+import type { ChildProcess, ChildProcessByStdio } from 'node:child_process';
+import type { Readable, Writable } from 'node:stream';
 import stripAnsi from 'strip-ansi';
 
 export enum Phase {
@@ -34,17 +34,17 @@ function createReducer<S, A>(params: { state: S; reducer: (state: S, action: A) 
 type InternalState = Readonly<
 	| { phase: Phase.Stopped }
 	| {
-			phase: Phase.Starting;
-			pid: number;
-			child: ChildProcess;
-			pending: { promise: Promise<number>; action: StartAction };
-	  }
+		phase: Phase.Starting;
+		pid: number;
+		child: ChildProcess;
+		pending: { promise: Promise<number>; action: StartAction };
+	}
 	| {
-			phase: Phase.Stopping;
-			pid: number;
-			child: ChildProcess;
-			pending: { promise: Promise<number>; action: StopAction };
-	  }
+		phase: Phase.Stopping;
+		pid: number;
+		child: ChildProcess;
+		pending: { promise: Promise<number>; action: StopAction };
+	}
 	| { phase: Phase.Started; pid: number; child: ChildProcess }
 >;
 
@@ -57,12 +57,12 @@ enum ActionType {
 
 interface StartAction {
 	readonly type: ActionType.Start;
-	readonly timeout: number;
+	readonly timeout?: number;
 }
 
 interface StopAction {
 	readonly type: ActionType.Stop;
-	readonly timeout: number;
+	readonly timeout?: number;
 }
 
 interface CompleteAction {
@@ -88,7 +88,7 @@ function errorForFail(fail: FailAction): Error {
 			return new Error(`The process failed to ${verb} because it closed`);
 		case FailType.Timeout:
 			return new Error(`Timeout waiting for process to ${verb}`);
-		// no default
+			// no default
 	}
 }
 
@@ -116,11 +116,12 @@ function nextPatternIndex(start = 0, patterns: RegExp[], str: string) {
  * Patterns are expected to match in the order they are given.
  * When the patterns are all matched this returns true.
  */
-function createIsStartedTest(isStartedPatterns: ReadonlyArray<RegExp>) {
+function createIsStartedTest(isStartedPatterns?: ReadonlyArray<RegExp>) {
+	if (isStartedPatterns == null) return () => true;
 	// eslint-disable-next-line security/detect-non-literal-regexp
 	const patterns = isStartedPatterns.map((it) => new RegExp(it, 'g'));
 	let index = 0;
-	return function isStartedTest(chunk: any): boolean {
+	return function isStartedTest(chunk: { toString(): string } | null): boolean {
 		if (chunk) {
 			const str = stripAnsi(chunk.toString());
 			index = nextPatternIndex(index, patterns, str);
@@ -149,11 +150,11 @@ function assertPid(child: ChildProcess): number {
 
 export interface Options {
 	spawn: () => ChildProcessByStdio<Writable | null, Readable, Readable | null>;
-	isStartedPatterns: ReadonlyArray<RegExp>;
+	isStartedPatterns?: ReadonlyArray<RegExp>;
 	logger?: typeof createLogger;
 	name?: string;
-	startTimeout: number;
-	stopTimeout: number;
+	startTimeout?: number;
+	stopTimeout?: number;
 }
 
 export default function create(opts: Options): Manager {
@@ -170,7 +171,7 @@ export default function create(opts: Options): Manager {
 					return reduceCompleteAction(state, action);
 				case ActionType.Fail:
 					return reduceFailAction(state, action);
-				// no default
+					// no default
 			}
 		},
 	});
@@ -183,35 +184,38 @@ export default function create(opts: Options): Manager {
 				log.info(`will ${action.type}`);
 				const child = spawn();
 				const pid = assertPid(child);
-				const promise = new Promise<number>(function (resolve, reject) {
-					function dataListener(chunk: any) {
-						if (isStartedTest(chunk)) {
-							finish({ type: ActionType.Complete, action });
-							resolve(pid);
+				const isStartedTest = createIsStartedTest(isStartedPatterns);
+				const promise = isStartedTest(null)
+					? Promise.resolve(pid)
+						.finally(() => dispatch({ type: ActionType.Complete, action }))
+					: new Promise<number>(function (resolve, reject) {
+						function dataListener(chunk: { toString(): string }) {
+							if (isStartedTest(chunk)) {
+								finish({ type: ActionType.Complete, action });
+								resolve(pid);
+							}
 						}
-					}
-					function closeListener() {
-						const fail = { type: ActionType.Fail, action, reason: FailType.Close } as const;
-						finish(fail);
-						reject(errorForFail(fail));
-					}
-					function timeout() {
-						const fail = { type: ActionType.Fail, action, reason: FailType.Timeout } as const;
-						finish(fail);
-						child.kill();
-						reject(errorForFail(fail));
-					}
-					function finish(action: CompleteAction | FailAction) {
-						clearTimeout(timer);
-						child.off('close', closeListener);
-						child.stdout.off('data', dataListener);
-						dispatch(action);
-					}
-					const timer = setTimeout(timeout, action.timeout);
-					const isStartedTest = createIsStartedTest(isStartedPatterns);
-					child.once('close', closeListener);
-					child.stdout.on('data', dataListener);
-				});
+						function closeListener() {
+							const fail = { type: ActionType.Fail, action, reason: FailType.Close } as const;
+							finish(fail);
+							reject(errorForFail(fail));
+						}
+						function timeout() {
+							const fail = { type: ActionType.Fail, action, reason: FailType.Timeout } as const;
+							finish(fail);
+							child.kill();
+							reject(errorForFail(fail));
+						}
+						function finish(action: CompleteAction | FailAction) {
+							clearTimeout(timer);
+							child.off('close', closeListener);
+							child.stdout.off('data', dataListener);
+							dispatch(action);
+						}
+						const timer = setTimeout(timeout, action.timeout);
+						child.once('close', closeListener);
+						child.stdout.on('data', dataListener);
+					});
 				return { phase: Phase.Starting, pid, child, pending: { action, promise } };
 			}
 			default:
@@ -265,8 +269,9 @@ export default function create(opts: Options): Manager {
 						: { phase: Phase.Stopped };
 				}
 				break;
-			// no default
+				// no default
 		}
+		console.log(complete, state);
 		log.warn(`${verb} did cancel (already ${state.phase})`);
 		return state;
 	}
@@ -283,7 +288,7 @@ export default function create(opts: Options): Manager {
 						: { phase: Phase.Started, pid: state.pid, child: state.child };
 				}
 				break;
-			// no default
+				// no default
 		}
 		log.warn(`${verb} did cancel (reason: ${fail.reason})`);
 		return state;
@@ -307,7 +312,7 @@ export default function create(opts: Options): Manager {
 					return state.pid;
 				default:
 					dispatch({ type: ActionType.Start, timeout });
-					return assertPromise(Phase.Starting);
+					return await assertPromise(Phase.Starting);
 			}
 		},
 		stop: async (timeout = stopTimeout) => {
@@ -318,7 +323,7 @@ export default function create(opts: Options): Manager {
 					return;
 				default:
 					dispatch({ type: ActionType.Stop, timeout });
-					return assertPromise(Phase.Stopping);
+					return await assertPromise(Phase.Stopping);
 			}
 		},
 	};
