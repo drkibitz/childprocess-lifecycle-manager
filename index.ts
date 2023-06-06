@@ -1,6 +1,6 @@
 import type { ChildProcess, ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
-import stripAnsi from 'npm:strip-ansi';
+import stripAnsi from 'strip-ansi';
 
 export enum Phase {
 	Stopped = 'stopped',
